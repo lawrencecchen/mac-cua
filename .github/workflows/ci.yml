@@ -52,37 +52,25 @@ jobs:
       - name: Cache npm packages
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.npm
-            ~/.claude-code
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json', '.github/workflows/ci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: ${{ runner.os }}-npm-
 
-      - name: Install computer-use-mcp
-        run: npm install -g computer-use-mcp
-
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Grant TCC permissions (Accessibility + Screen Recording)
+      - name: Setup environment
         run: |
-          APPS=(
-            "/usr/bin/bash"
-            "/bin/bash"
-            "/usr/bin/osascript"
-            "/usr/sbin/screencapture"
-          )
+          # Run all installs, TCC grants, and config in parallel
 
-          SERVICES=(
-            "kTCCServiceAccessibility"
-            "kTCCServiceScreenCapture"
-          )
+          # 1. npm installs (background)
+          npm install -g computer-use-mcp @anthropic-ai/claude-code &
+          NPM_PID=$!
 
+          # 2. ffmpeg install (background)
+          (which ffmpeg || brew install ffmpeg) &
+          FFMPEG_PID=$!
+
+          # 3. TCC grants for system binaries (immediate, no deps)
           grant_tcc() {
-            local app="$1"
-            local svc="$2"
-            local db="$3"
+            local app="$1" svc="$2" db="$3"
             local cmd="INSERT OR REPLACE INTO access VALUES('$svc','$app',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,CAST(strftime('%s','now') AS INTEGER));"
             if [ "$db" = "/Library/Application Support/com.apple.TCC/TCC.db" ]; then
               sudo sqlite3 "$db" "$cmd" 2>/dev/null || true
@@ -90,10 +78,10 @@ jobs:
               sqlite3 "$db" "$cmd" 2>/dev/null || true
             fi
           }
-
-          for app in "${APPS[@]}"; do
+          SYSTEM_APPS=("/usr/bin/bash" "/bin/bash" "/usr/bin/osascript" "/usr/sbin/screencapture")
+          SERVICES=("kTCCServiceAccessibility" "kTCCServiceScreenCapture")
+          for app in "${SYSTEM_APPS[@]}"; do
             if [ -f "$app" ]; then
-              echo "Granting TCC for $app"
               for svc in "${SERVICES[@]}"; do
                 grant_tcc "$app" "$svc" "/Library/Application Support/com.apple.TCC/TCC.db"
                 grant_tcc "$app" "$svc" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
@@ -101,75 +89,21 @@ jobs:
             fi
           done
 
-          # Also grant for Node.js and ffmpeg
-          for bin in node ffmpeg; do
-            p=$(which "$bin" 2>/dev/null || true)
-            if [ -n "$p" ]; then
-              echo "Granting TCC for $p"
-              for svc in "${SERVICES[@]}"; do
-                grant_tcc "$p" "$svc" "/Library/Application Support/com.apple.TCC/TCC.db"
-                grant_tcc "$p" "$svc" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-              done
-            fi
-          done
-
-          # Restart tccd to pick up changes
-          sudo killall tccd 2>/dev/null || true
-          echo "TCC permissions granted (system + user databases)"
-
-      - name: Suppress screen capture nag dialog
-        run: |
-          # On macOS 15+, the "bypass window picker" dialog is controlled by replayd
-          # via ScreenCaptureApprovals.plist, separate from TCC.db
+          # 4. Suppress screen capture nag dialog for system binaries
           PLIST="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
           mkdir -p "$(dirname "$PLIST")"
           FUTURE="$(date -j -v+100y +'%Y-%m-%d %H:%M:%S +0000')"
-
-          APPS=(
-            "/usr/bin/bash"
-            "/bin/bash"
-            "/usr/bin/osascript"
-            "/usr/sbin/screencapture"
-          )
-
-          for app in "${APPS[@]}"; do
+          for app in "${SYSTEM_APPS[@]}"; do
             if [ -f "$app" ]; then
-              # macOS 15.1+ format with dict keys
               /usr/bin/defaults write "$PLIST" "$app" -dict \
                 kScreenCaptureApprovalLastAlerted -date "$FUTURE" \
                 kScreenCaptureApprovalLastUsed -date "$FUTURE" 2>/dev/null || \
-              # Fallback: macOS 15.0 format (plain date)
               /usr/bin/defaults write "$PLIST" "$app" -date "$FUTURE" 2>/dev/null || true
             fi
           done
 
-          # Also for Node.js and ffmpeg
-          for bin in node ffmpeg; do
-            p=$(which "$bin" 2>/dev/null || true)
-            if [ -n "$p" ]; then
-              /usr/bin/defaults write "$PLIST" "$p" -dict \
-                kScreenCaptureApprovalLastAlerted -date "$FUTURE" \
-                kScreenCaptureApprovalLastUsed -date "$FUTURE" 2>/dev/null || \
-              /usr/bin/defaults write "$PLIST" "$p" -date "$FUTURE" 2>/dev/null || true
-            fi
-          done
-
-          # Restart replayd and cfprefsd to pick up changes
-          killall -HUP replayd 2>/dev/null || true
-          killall -u "$USER" cfprefsd 2>/dev/null || true
-
-          echo "ScreenCaptureApprovals.plist updated:"
-          /usr/bin/defaults read "$PLIST" 2>/dev/null || echo "(empty)"
-
-      - name: Verify display access
-        run: |
-          echo "macOS version: $(sw_vers -productVersion)"
-          /usr/sbin/screencapture -x /tmp/test_screenshot.png && echo "screencapture works" || echo "screencapture failed"
-          ls -la /tmp/test_screenshot.png || true
-
-      - name: Create MCP config
-        run: |
-          cat > mcp.json << 'EOF'
+          # 5. Create MCP config (no deps)
+          cat > mcp.json << 'MCPEOF'
           {
             "mcpServers": {
               "computer-use": {
@@ -178,28 +112,43 @@ jobs:
               }
             }
           }
-          EOF
+          MCPEOF
 
-      - name: Install ffmpeg
-        run: which ffmpeg || brew install ffmpeg
+          # Wait for installs to finish
+          wait $NPM_PID
+          echo "npm installs done"
+          wait $FFMPEG_PID
+          echo "ffmpeg ready"
+
+          # 6. TCC + dialog suppression for installed binaries (node, ffmpeg)
+          for bin in node ffmpeg; do
+            p=$(which "$bin" 2>/dev/null || true)
+            if [ -n "$p" ]; then
+              for svc in "${SERVICES[@]}"; do
+                grant_tcc "$p" "$svc" "/Library/Application Support/com.apple.TCC/TCC.db"
+                grant_tcc "$p" "$svc" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+              done
+              /usr/bin/defaults write "$PLIST" "$p" -dict \
+                kScreenCaptureApprovalLastAlerted -date "$FUTURE" \
+                kScreenCaptureApprovalLastUsed -date "$FUTURE" 2>/dev/null || true
+            fi
+          done
+
+          sudo killall tccd 2>/dev/null || true
+          killall -HUP replayd 2>/dev/null || true
+          killall -u "$USER" cfprefsd 2>/dev/null || true
+
+          echo "Environment ready"
 
       - name: Start screen recording
         run: |
-          # Use ffmpeg to record the macOS screen via AVFoundation
-          # List devices to find the screen capture device index
-          echo "Available capture devices:"
-          ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true
-
-          # Record screen (device index 0 = "Capture screen 0" on GH Actions macos-15)
           ffmpeg -f avfoundation -framerate 10 -capture_cursor 1 -i "0:none" \
             -c:v libx264 -preset ultrafast -crf 28 \
             -pix_fmt yuv420p \
             /tmp/screen-recording.mp4 </dev/null 2>/tmp/ffmpeg.log &
           echo $! > /tmp/recording-pid.txt
-          echo "Screen recording started with ffmpeg (PID: $(cat /tmp/recording-pid.txt))"
           sleep 2
-          # Verify it's running
-          kill -0 $(cat /tmp/recording-pid.txt) 2>/dev/null && echo "ffmpeg is running" || { echo "ffmpeg failed to start:"; cat /tmp/ffmpeg.log; }
+          kill -0 $(cat /tmp/recording-pid.txt) 2>/dev/null && echo "Recording started (PID: $(cat /tmp/recording-pid.txt))" || { echo "ffmpeg failed:"; cat /tmp/ffmpeg.log; }
 
       - name: Run Claude Code with computer use
         env:
