@@ -3,10 +3,10 @@ name: CI
 on:
   workflow_dispatch:
     inputs:
-      message:
-        description: "Message to print"
+      prompt:
+        description: "Prompt for Claude Code"
         required: false
-        default: "Hello from macOS"
+        default: "Take a screenshot and describe what you see on the macOS desktop"
         type: string
   push:
     branches: [main]
@@ -22,35 +22,111 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache npm packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.claude-code
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install computer-use-mcp
+        run: npm install -g computer-use-mcp
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Grant TCC permissions (Accessibility + Screen Recording)
+        run: |
+          # Get the bundle ID for the runner's terminal process
+          # On GH Actions, the runner agent executes bash directly
+          APPS=(
+            "/usr/bin/bash"
+            "/bin/bash"
+            "/usr/bin/osascript"
+            "/usr/sbin/screencapture"
+          )
+
+          for app in "${APPS[@]}"; do
+            if [ -f "$app" ]; then
+              echo "Granting TCC permissions for $app"
+              # Accessibility (kTCCServiceAccessibility)
+              sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+                "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceAccessibility', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+              # Screen Recording (kTCCServiceScreenCapture)
+              sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+                "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+            fi
+          done
+
+          # Also grant for Node.js
+          NODE_PATH=$(which node)
+          echo "Granting TCC permissions for $NODE_PATH"
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceAccessibility', '$NODE_PATH', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture', '$NODE_PATH', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+
+          echo "TCC permissions granted"
+
       - name: Verify display access
         run: |
-          echo "Display info:"
-          system_profiler SPDisplaysDataType
-          echo ""
-          echo "Window server check:"
+          echo "macOS version: $(sw_vers -productVersion)"
           /usr/sbin/screencapture -x /tmp/test_screenshot.png && echo "screencapture works" || echo "screencapture failed"
           ls -la /tmp/test_screenshot.png || true
-          echo ""
-          echo "Resolution:"
-          system_profiler SPDisplaysDataType | grep Resolution || true
 
-      - name: Run a test
-        id: test
+      - name: Create MCP config
         run: |
-          output="Result: ${{ inputs.message }} ($(sw_vers -productVersion))"
-          echo "result=$output" >> "$GITHUB_OUTPUT"
-          echo "$output"
+          cat > mcp.json << 'EOF'
+          {
+            "mcpServers": {
+              "computer-use": {
+                "command": "computer-use-mcp",
+                "args": []
+              }
+            }
+          }
+          EOF
+
+      - name: Run Claude Code with computer use
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          claude -p \
+            --mcp-config ./mcp.json \
+            --allowedTools "mcp__computer-use__computer,Bash,Read,Write,Edit" \
+            --max-turns 10 \
+            --verbose \
+            "${{ inputs.prompt || 'Take a screenshot and describe what you see on the macOS desktop' }}" \
+            2>&1 | tee /tmp/claude-output.txt
 
       - name: Create issue with output
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Truncate output to fit in issue body
+          output=$(head -c 60000 /tmp/claude-output.txt)
           gh issue create \
-            --title "Workflow run ${{ github.run_id }}" \
-            --body "$(cat <<'EOF'
+            --title "CUA run ${{ github.run_id }}" \
+            --body "$(cat <<EOF
           **Triggered by:** ${{ github.actor }}
-          **Output:** ${{ steps.test.outputs.result }}
+          **Prompt:** ${{ inputs.prompt }}
           **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          <details>
+          <summary>Claude Output</summary>
+
+          \`\`\`
+          $output
+          \`\`\`
+
+          </details>
           EOF
           )"
