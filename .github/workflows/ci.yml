@@ -1,6 +1,13 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Message to print"
+        required: false
+        default: "Hello from macOS"
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -12,5 +19,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify display access
+        run: |
+          echo "Display info:"
+          system_profiler SPDisplaysDataType
+          echo ""
+          echo "Window server check:"
+          /usr/sbin/screencapture -x /tmp/test_screenshot.png && echo "screencapture works" || echo "screencapture failed"
+          ls -la /tmp/test_screenshot.png || true
+          echo ""
+          echo "Resolution:"
+          system_profiler SPDisplaysDataType | grep Resolution || true
+
       - name: Run a test
-        run: echo "Hello from macOS"
+        id: test
+        run: |
+          output="Result: ${{ inputs.message }} ($(sw_vers -productVersion))"
+          echo "result=$output" >> "$GITHUB_OUTPUT"
+          echo "$output"
+
+      - name: Create issue with output
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "Workflow run ${{ github.run_id }}" \
+            --body "$(cat <<'EOF'
+          **Triggered by:** ${{ github.actor }}
+          **Output:** ${{ steps.test.outputs.result }}
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
