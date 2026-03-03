@@ -329,59 +329,21 @@ jobs:
             /tmp/screen-recording.mp4
             /tmp/cua-screenshots/
 
-      - name: Upload video for issue embed
+      - name: Prepare video embed
         if: always() && github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set +e
           RUN_ID="${{ github.run_id }}"
           REPO="${{ github.repository }}"
-
-          if [ ! -f /tmp/screen-recording.mp4 ]; then
-            echo "VIDEO_MD_FILE=" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          # Convert first 15s to animated GIF for inline preview
-          echo "Creating GIF preview..."
-          ffmpeg -i /tmp/screen-recording.mp4 \
-            -vf "fps=5,scale=640:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
-            -t 15 /tmp/preview.gif </dev/null 2>/dev/null
-          echo "GIF created: $(ls -la /tmp/preview.gif 2>/dev/null || echo 'not found')"
-
-          # Push GIF to artifacts branch
-          GIF_URL=""
-          if [ -f /tmp/preview.gif ] && [ "$(stat -f%z /tmp/preview.gif 2>/dev/null || echo 0)" -gt 1000 ]; then
-            if [ -d /tmp/artifacts-work ]; then
-              cp /tmp/preview.gif "/tmp/artifacts-work/runs/${RUN_ID}/preview.gif" 2>/dev/null
-              cd /tmp/artifacts-work
-              git add .
-              git -c user.name="github-actions" -c user.email="actions@github.com" \
-                commit -m "Add GIF preview for run ${RUN_ID}" 2>/dev/null
-              git push origin artifacts 2>/dev/null
-              cd - >/dev/null
-              GIF_URL="https://raw.githubusercontent.com/${REPO}/artifacts/runs/${RUN_ID}/preview.gif"
-              echo "GIF pushed: ${GIF_URL}"
-            fi
-          fi
-
-          # Create release with full video
-          TAG="run-${RUN_ID}"
-          gh release create "$TAG" /tmp/screen-recording.mp4 \
-            --repo "${REPO}" \
-            --title "CUA Run ${RUN_ID}" \
-            --notes "Screen recording for run ${RUN_ID}" \
-            --latest=false 2>/dev/null
-          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/screen-recording.mp4"
-
-          # Write markdown for issue body
           VIDEO_MD_FILE=$(mktemp)
-          if [ -n "$GIF_URL" ]; then
-            echo "![Screen Recording](${GIF_URL})" > "$VIDEO_MD_FILE"
-            echo "" >> "$VIDEO_MD_FILE"
+
+          if [ -f /tmp/screen-recording.mp4 ]; then
+            # Link to blob view on artifacts branch — GitHub renders mp4 with native video player
+            BLOB_URL="https://github.com/${REPO}/blob/artifacts/runs/${RUN_ID}/recording.mp4"
+            echo "[Screen Recording](${BLOB_URL})" > "$VIDEO_MD_FILE"
+          else
+            echo "_No recording available_" > "$VIDEO_MD_FILE"
           fi
-          echo "[Download full recording (.mp4)](${DOWNLOAD_URL})" >> "$VIDEO_MD_FILE"
+
           echo "VIDEO_MD_FILE=${VIDEO_MD_FILE}" >> "$GITHUB_ENV"
 
       - name: Create issue with output
