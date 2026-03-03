@@ -329,23 +329,103 @@ jobs:
             /tmp/screen-recording.mp4
             /tmp/cua-screenshots/
 
-      - name: Upload video to release
+      - name: Upload video for issue embed
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RUN_ID="${{ github.run_id }}"
-          TAG="run-${RUN_ID}"
-          if [ -f /tmp/screen-recording.mp4 ]; then
-            gh release create "$TAG" /tmp/screen-recording.mp4 \
-              --repo "${{ github.repository }}" \
-              --title "CUA Run ${RUN_ID}" \
-              --notes "Screen recording for run ${RUN_ID}" \
-              --latest=false
-            echo "VIDEO_URL=https://github.com/${{ github.repository }}/releases/download/${TAG}/screen-recording.mp4" >> "$GITHUB_ENV"
-          else
-            echo "VIDEO_URL=" >> "$GITHUB_ENV"
+          REPO="${{ github.repository }}"
+
+          if [ ! -f /tmp/screen-recording.mp4 ]; then
+            echo "VIDEO_MD=_No recording available_" >> "$GITHUB_ENV"
+            exit 0
           fi
+
+          VIDEO_SIZE=$(stat -f%z /tmp/screen-recording.mp4)
+          REPO_ID=$(gh api "repos/${REPO}" --jq '.id')
+
+          # Try GitHub's internal upload API (used by the web UI for issue attachments)
+          echo "Attempting GitHub user-attachments upload..."
+          UPLOAD_POLICY=$(curl -s -X POST "https://github.com/upload/policies/assets" \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"recording-${RUN_ID}.mp4\",
+              \"size\": ${VIDEO_SIZE},
+              \"content_type\": \"video/mp4\",
+              \"repository_id\": ${REPO_ID}
+            }" 2>/dev/null) || true
+
+          UPLOAD_URL=$(echo "$UPLOAD_POLICY" | jq -r '.upload_url // empty' 2>/dev/null)
+          ASSET_URL=$(echo "$UPLOAD_POLICY" | jq -r '.asset.href // .asset_upload_url // empty' 2>/dev/null)
+          FORM_FIELDS=$(echo "$UPLOAD_POLICY" | jq -r '.form // empty' 2>/dev/null)
+
+          if [ -n "$UPLOAD_URL" ] && [ -n "$FORM_FIELDS" ]; then
+            echo "Got upload policy, uploading to S3..."
+            # Build multipart form from policy fields + file
+            CURL_ARGS=()
+            for key in $(echo "$FORM_FIELDS" | jq -r 'keys[]'); do
+              val=$(echo "$FORM_FIELDS" | jq -r ".\"$key\"")
+              CURL_ARGS+=(-F "${key}=${val}")
+            done
+            CURL_ARGS+=(-F "file=@/tmp/screen-recording.mp4")
+
+            UPLOAD_RESP=$(curl -s -w "\n%{http_code}" "${CURL_ARGS[@]}" "$UPLOAD_URL" 2>/dev/null) || true
+            HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -1)
+
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "Upload succeeded! Asset URL: $ASSET_URL"
+              # Write video markdown using the user-attachments URL
+              VIDEO_MD_FILE=$(mktemp)
+              echo "<video src=\"${ASSET_URL}\" controls autoplay muted loop></video>" > "$VIDEO_MD_FILE"
+              echo "VIDEO_MD_FILE=${VIDEO_MD_FILE}" >> "$GITHUB_ENV"
+              exit 0
+            else
+              echo "S3 upload returned HTTP ${HTTP_CODE}, falling back..."
+            fi
+          else
+            echo "Upload policy unavailable (expected for GITHUB_TOKEN), falling back..."
+            echo "Response: $(echo "$UPLOAD_POLICY" | head -c 500)"
+          fi
+
+          # Fallback: convert to GIF preview + release download
+          echo "Creating GIF preview..."
+          ffmpeg -i /tmp/screen-recording.mp4 \
+            -vf "fps=5,scale=640:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
+            -t 15 /tmp/preview.gif </dev/null 2>/dev/null || true
+
+          if [ -f /tmp/preview.gif ] && [ "$(stat -f%z /tmp/preview.gif)" -gt 1000 ]; then
+            # Push GIF to artifacts branch
+            if [ -d /tmp/artifacts-work ]; then
+              cp /tmp/preview.gif "/tmp/artifacts-work/runs/${RUN_ID}/preview.gif"
+              cd /tmp/artifacts-work
+              git add .
+              git -c user.name="github-actions" -c user.email="actions@github.com" \
+                commit -m "Add GIF preview for run ${RUN_ID}" || true
+              git push origin artifacts || true
+              cd -
+            fi
+            GIF_URL="https://raw.githubusercontent.com/${REPO}/artifacts/runs/${RUN_ID}/preview.gif"
+          fi
+
+          # Also create release for full video download
+          TAG="run-${RUN_ID}"
+          gh release create "$TAG" /tmp/screen-recording.mp4 \
+            --repo "${REPO}" \
+            --title "CUA Run ${RUN_ID}" \
+            --notes "Screen recording for run ${RUN_ID}" \
+            --latest=false 2>/dev/null || true
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/screen-recording.mp4"
+
+          VIDEO_MD_FILE=$(mktemp)
+          if [ -n "$GIF_URL" ]; then
+            echo "![Screen Recording](${GIF_URL})" > "$VIDEO_MD_FILE"
+            echo "" >> "$VIDEO_MD_FILE"
+          fi
+          echo "[Download full recording (.mp4)](${DOWNLOAD_URL})" >> "$VIDEO_MD_FILE"
+          echo "VIDEO_MD_FILE=${VIDEO_MD_FILE}" >> "$GITHUB_ENV"
 
       - name: Create issue with output
         if: github.event_name == 'workflow_dispatch'
@@ -364,15 +444,8 @@ jobs:
             echo ""
             echo "## Screen Recording"
             echo ""
-            if [ -n "$VIDEO_URL" ]; then
-              # Use first screenshot as clickable thumbnail linking to video
-              THUMB=$(ls /tmp/cua-screenshots/*_post_*.png 2>/dev/null | head -1)
-              if [ -n "$THUMB" ]; then
-                THUMB_NAME=$(basename "$THUMB")
-                echo "[![Screen Recording](${RAW}/screenshots/${THUMB_NAME})](${VIDEO_URL})"
-              fi
-              echo ""
-              echo "[Download recording](${VIDEO_URL})"
+            if [ -f "$VIDEO_MD_FILE" ]; then
+              cat "$VIDEO_MD_FILE"
             else
               echo "_No recording available_"
             fi
