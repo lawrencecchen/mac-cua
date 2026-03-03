@@ -105,8 +105,8 @@ jobs:
           echo "Available capture devices:"
           ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true
 
-          # Record screen (device index 1 is typically "Capture screen 0")
-          ffmpeg -f avfoundation -framerate 10 -capture_cursor 1 -i "1:none" \
+          # Record screen (device index 0 = "Capture screen 0" on GH Actions macos-15)
+          ffmpeg -f avfoundation -framerate 10 -capture_cursor 1 -i "0:none" \
             -c:v libx264 -preset ultrafast -crf 28 \
             -pix_fmt yuv420p \
             /tmp/screen-recording.mp4 </dev/null 2>/tmp/ffmpeg.log &
