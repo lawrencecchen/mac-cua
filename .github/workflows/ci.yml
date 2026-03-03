@@ -176,38 +176,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Build a readable trajectory for the issue
-          trajectory=$(cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
-            type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
-            case "$type" in
-              assistant)
-                echo "$line" | jq -r '
-                  .message.content[]? |
-                  if .type == "tool_use" then
-                    "**Tool Call:** `\(.name)`\n```json\n\(.input | tojson | .[0:1000])\n```\n"
-                  elif .type == "text" then
-                    "\(.text)\n"
-                  else empty end
-                ' 2>/dev/null
-                ;;
-              result)
-                echo "$line" | jq -r '"---\n**Final Result:**\n\(.result | .[0:2000])"' 2>/dev/null
-                ;;
-            esac
-          done)
+          # Build issue body as a file to avoid escaping issues
+          {
+            echo "**Triggered by:** ${{ github.actor }}"
+            echo "**Prompt:** ${{ inputs.prompt }}"
+            echo "**Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "## Trajectory"
+            echo ""
 
-          # Truncate to fit GitHub issue body limit
-          trajectory=$(echo "$trajectory" | head -c 60000)
+            cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
+              type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+              case "$type" in
+                assistant)
+                  echo "$line" | jq -r '
+                    .message.content[]? |
+                    if .type == "tool_use" then
+                      "**Tool Call:** `\(.name)`\n\n```json\n\(.input | tojson | .[0:1000])\n```\n"
+                    elif .type == "text" then
+                      "\(.text)\n"
+                    else empty end
+                  ' 2>/dev/null
+                  ;;
+                result)
+                  echo "$line" | jq -r '"---\n**Final Result:**\n\(.result | .[0:2000])"' 2>/dev/null
+                  ;;
+              esac
+            done
+          } | head -c 60000 > /tmp/issue-body.md
 
           gh issue create \
             --title "CUA run ${{ github.run_id }}" \
-            --body "$(cat <<EOF
-          **Triggered by:** ${{ github.actor }}
-          **Prompt:** ${{ inputs.prompt }}
-          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          ## Trajectory
-
-          $trajectory
-          EOF
-          )"
+            --body-file /tmp/issue-body.md
