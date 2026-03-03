@@ -95,6 +95,9 @@ jobs:
           }
           EOF
 
+      - name: Install ffmpeg
+        run: which ffmpeg || brew install ffmpeg
+
       - name: Start screen recording
         run: |
           # Use ffmpeg to record the macOS screen via AVFoundation
@@ -102,14 +105,16 @@ jobs:
           echo "Available capture devices:"
           ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true
 
-          # Record screen (device 1 is typically "Capture screen 0" on macOS runners)
-          ffmpeg -f avfoundation -framerate 10 -i "1:none" \
+          # Record screen (device index 1 is typically "Capture screen 0")
+          ffmpeg -f avfoundation -framerate 10 -capture_cursor 1 -i "1:none" \
             -c:v libx264 -preset ultrafast -crf 28 \
             -pix_fmt yuv420p \
-            /tmp/screen-recording.mp4 &
+            /tmp/screen-recording.mp4 </dev/null 2>/tmp/ffmpeg.log &
           echo $! > /tmp/recording-pid.txt
           echo "Screen recording started with ffmpeg (PID: $(cat /tmp/recording-pid.txt))"
           sleep 2
+          # Verify it's running
+          kill -0 $(cat /tmp/recording-pid.txt) 2>/dev/null && echo "ffmpeg is running" || { echo "ffmpeg failed to start:"; cat /tmp/ffmpeg.log; }
 
       - name: Run Claude Code with computer use
         env:
@@ -131,12 +136,14 @@ jobs:
         run: |
           if [ -f /tmp/recording-pid.txt ]; then
             pid=$(cat /tmp/recording-pid.txt)
-            # Send 'q' to ffmpeg's stdin to gracefully stop, or SIGINT
             kill -INT "$pid" 2>/dev/null || true
-            # Wait for ffmpeg to finalize the file
-            sleep 3
+            # Wait for ffmpeg to finalize the mp4 (write moov atom)
+            for i in $(seq 1 10); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
             echo "Screen recording stopped"
-            ls -la /tmp/screen-recording.mp4 || echo "No recording file found"
+            ls -la /tmp/screen-recording.mp4 || { echo "No recording found. ffmpeg log:"; cat /tmp/ffmpeg.log 2>/dev/null; }
           fi
 
       - name: Collect transcript
