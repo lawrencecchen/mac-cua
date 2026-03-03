@@ -278,9 +278,6 @@ jobs:
           cp /tmp/cua-screenshots/*.png "${DIR}/screenshots/" 2>/dev/null || true
           cp /tmp/cua-screenshots/metadata.jsonl "${DIR}/" 2>/dev/null || true
 
-          # Copy video
-          cp /tmp/screen-recording.mp4 "${DIR}/recording.mp4" 2>/dev/null || true
-
           # Copy transcripts
           cp /tmp/claude-trajectory.jsonl "${DIR}/" 2>/dev/null || true
           cp /tmp/claude-transcript.jsonl "${DIR}/" 2>/dev/null || true
@@ -337,9 +334,8 @@ jobs:
           VIDEO_MD_FILE=$(mktemp)
 
           if [ -f /tmp/screen-recording.mp4 ]; then
-            # Link to blob view on artifacts branch — GitHub renders mp4 with native video player
-            BLOB_URL="https://github.com/${REPO}/blob/artifacts/runs/${RUN_ID}/recording.mp4"
-            echo "[Screen Recording](${BLOB_URL})" > "$VIDEO_MD_FILE"
+            # Link to the actions run artifacts page where the mp4 can be downloaded
+            echo "[Download screen recording (artifacts)](https://github.com/${REPO}/actions/runs/${RUN_ID}#artifacts)" > "$VIDEO_MD_FILE"
           else
             echo "_No recording available_" > "$VIDEO_MD_FILE"
           fi
