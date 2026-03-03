@@ -86,13 +86,13 @@ jobs:
           }
 
           for app in "${APPS[@]}"; do
-            [ -f "$app" ] && grant_tcc "$app"
+            if [ -f "$app" ]; then grant_tcc "$app"; fi
           done
 
           # Also grant for Node.js and ffmpeg
           for bin in node ffmpeg; do
-            p=$(which "$bin" 2>/dev/null)
-            [ -n "$p" ] && grant_tcc "$p"
+            p=$(which "$bin" 2>/dev/null || true)
+            if [ -n "$p" ]; then grant_tcc "$p"; fi
           done
 
           echo "TCC permissions granted (system + user databases)"
