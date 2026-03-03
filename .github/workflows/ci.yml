@@ -106,7 +106,9 @@ jobs:
       - name: Run Claude Code with computer use
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CUA_SCREENSHOT_DIR: /tmp/cua-screenshots
         run: |
+          mkdir -p /tmp/cua-screenshots
           claude -p \
             --mcp-config ./mcp.json \
             --allowedTools "mcp__computer-use__computer,Bash,Read,Write,Edit" \
@@ -126,6 +128,26 @@ jobs:
             sleep 2
             echo "Screen recording stopped"
             ls -la /tmp/screen-recording.mov || echo "No recording file found"
+          fi
+
+      - name: Collect transcript
+        if: always()
+        run: |
+          # Copy the Claude Code internal transcript if the hook captured its path
+          if [ -f /tmp/cua-screenshots/transcript_path.txt ]; then
+            TRANSCRIPT=$(cat /tmp/cua-screenshots/transcript_path.txt)
+            echo "Transcript path: $TRANSCRIPT"
+            if [ -f "$TRANSCRIPT" ]; then
+              cp "$TRANSCRIPT" /tmp/claude-transcript.jsonl
+              echo "Transcript copied ($(wc -l < /tmp/claude-transcript.jsonl) lines)"
+            fi
+          else
+            echo "No transcript path captured by hooks"
+            # Fallback: find the most recent transcript
+            find ~/.claude -name "transcript.jsonl" -newer /tmp/claude-trajectory.jsonl 2>/dev/null | head -1 | while read f; do
+              cp "$f" /tmp/claude-transcript.jsonl
+              echo "Found transcript at: $f"
+            done
           fi
 
       - name: Parse trajectory
@@ -159,7 +181,11 @@ jobs:
           done
 
           echo ""
-          echo "=== Full trajectory JSONL available as artifact ==="
+          echo "=== Screenshots captured by hooks ==="
+          ls -la /tmp/cua-screenshots/*.png 2>/dev/null || echo "No screenshots found"
+          echo ""
+          echo "=== Screenshot metadata ==="
+          cat /tmp/cua-screenshots/metadata.jsonl 2>/dev/null || echo "No metadata found"
 
       - name: Upload trajectory artifact
         if: always()
@@ -168,19 +194,33 @@ jobs:
           name: claude-trajectory-${{ github.run_id }}
           path: |
             /tmp/claude-trajectory.jsonl
+            /tmp/claude-transcript.jsonl
             /tmp/claude-stderr.txt
             /tmp/screen-recording.mov
+            /tmp/cua-screenshots/
 
       - name: Create issue with output
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
           # Build issue body as a file to avoid escaping issues
           {
             echo "**Triggered by:** ${{ github.actor }}"
             echo "**Prompt:** ${{ inputs.prompt }}"
-            echo "**Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "**Run:** ${RUN_URL}"
+            echo ""
+            echo "## Artifacts"
+            echo ""
+            echo "Download from [Actions run artifacts](${RUN_URL}#artifacts):"
+            echo "- **claude-trajectory-${{ github.run_id }}** — stream JSONL, Claude Code transcript, screenshots, screen recording (.mov)"
+            echo ""
+
+            # Count screenshots
+            screenshot_count=$(ls /tmp/cua-screenshots/*.png 2>/dev/null | wc -l | tr -d ' ')
+            echo "**Screenshots captured:** ${screenshot_count} (pre/post each tool call via hooks)"
             echo ""
             echo "## Trajectory"
             echo ""
