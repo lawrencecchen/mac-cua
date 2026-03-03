@@ -8,6 +8,14 @@ on:
         required: false
         default: "Take a screenshot and describe what you see on the macOS desktop"
         type: string
+      macos_version:
+        description: "macOS runner version"
+        required: false
+        default: "15"
+        type: choice
+        options:
+          - "15"
+          - "26"
   push:
     branches: [main]
   pull_request:
@@ -19,7 +27,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-${{ inputs.macos_version || '15' }}
     steps:
       - uses: actions/checkout@v4
 
