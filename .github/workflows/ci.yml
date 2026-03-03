@@ -15,6 +15,7 @@ on:
 
 permissions:
   issues: write
+  contents: write
 
 jobs:
   build:
@@ -96,12 +97,19 @@ jobs:
 
       - name: Start screen recording
         run: |
-          # screencapture -v records video, -V sets duration (we'll kill it later)
-          # Use -G to record without showing in dock, -x for no sounds
-          /usr/sbin/screencapture -v -x /tmp/screen-recording.mov &
-          echo $! > /tmp/screencapture-pid.txt
-          echo "Screen recording started (PID: $(cat /tmp/screencapture-pid.txt))"
-          sleep 1
+          # Use ffmpeg to record the macOS screen via AVFoundation
+          # List devices to find the screen capture device index
+          echo "Available capture devices:"
+          ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true
+
+          # Record screen (device 1 is typically "Capture screen 0" on macOS runners)
+          ffmpeg -f avfoundation -framerate 10 -i "1:none" \
+            -c:v libx264 -preset ultrafast -crf 28 \
+            -pix_fmt yuv420p \
+            /tmp/screen-recording.mp4 &
+          echo $! > /tmp/recording-pid.txt
+          echo "Screen recording started with ffmpeg (PID: $(cat /tmp/recording-pid.txt))"
+          sleep 2
 
       - name: Run Claude Code with computer use
         env:
@@ -121,71 +129,100 @@ jobs:
       - name: Stop screen recording
         if: always()
         run: |
-          if [ -f /tmp/screencapture-pid.txt ]; then
-            pid=$(cat /tmp/screencapture-pid.txt)
-            # Send SIGINT to gracefully stop recording (finalizes the .mov file)
+          if [ -f /tmp/recording-pid.txt ]; then
+            pid=$(cat /tmp/recording-pid.txt)
+            # Send 'q' to ffmpeg's stdin to gracefully stop, or SIGINT
             kill -INT "$pid" 2>/dev/null || true
-            sleep 2
+            # Wait for ffmpeg to finalize the file
+            sleep 3
             echo "Screen recording stopped"
-            ls -la /tmp/screen-recording.mov || echo "No recording file found"
+            ls -la /tmp/screen-recording.mp4 || echo "No recording file found"
           fi
 
       - name: Collect transcript
         if: always()
         run: |
-          # Copy the Claude Code internal transcript if the hook captured its path
           if [ -f /tmp/cua-screenshots/transcript_path.txt ]; then
             TRANSCRIPT=$(cat /tmp/cua-screenshots/transcript_path.txt)
-            echo "Transcript path: $TRANSCRIPT"
             if [ -f "$TRANSCRIPT" ]; then
               cp "$TRANSCRIPT" /tmp/claude-transcript.jsonl
               echo "Transcript copied ($(wc -l < /tmp/claude-transcript.jsonl) lines)"
             fi
           else
-            echo "No transcript path captured by hooks"
-            # Fallback: find the most recent transcript
-            find ~/.claude -name "transcript.jsonl" -newer /tmp/claude-trajectory.jsonl 2>/dev/null | head -1 | while read f; do
+            find ~/.claude -name "*.jsonl" -newer /tmp/claude-trajectory.jsonl 2>/dev/null | head -1 | while read f; do
               cp "$f" /tmp/claude-transcript.jsonl
               echo "Found transcript at: $f"
             done
           fi
 
+      - name: Push media to artifacts branch
+        if: always()
+        run: |
+          RUN_ID="${{ github.run_id }}"
+          REPO="${{ github.repository }}"
+          BRANCH="artifacts"
+          DIR="runs/${RUN_ID}"
+
+          # Clone bare to push to artifacts branch
+          cd /tmp
+          git clone --bare "https://x-access-token:${{ github.token }}@github.com/${REPO}.git" artifacts-repo
+          cd artifacts-repo
+
+          # Create orphan artifacts branch if it doesn't exist
+          if ! git rev-parse --verify "${BRANCH}" 2>/dev/null; then
+            # Create an empty orphan commit
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            COMMIT=$(echo "artifacts branch" | git commit-tree "$EMPTY_TREE")
+            git update-ref "refs/heads/${BRANCH}" "$COMMIT"
+          fi
+
+          # Checkout artifacts branch in a worktree
+          git worktree add /tmp/artifacts-work "${BRANCH}"
+          cd /tmp/artifacts-work
+          mkdir -p "${DIR}/screenshots"
+
+          # Copy screenshots
+          cp /tmp/cua-screenshots/*.png "${DIR}/screenshots/" 2>/dev/null || true
+          cp /tmp/cua-screenshots/metadata.jsonl "${DIR}/" 2>/dev/null || true
+
+          # Copy video
+          cp /tmp/screen-recording.mp4 "${DIR}/recording.mp4" 2>/dev/null || true
+
+          # Copy transcripts
+          cp /tmp/claude-trajectory.jsonl "${DIR}/" 2>/dev/null || true
+          cp /tmp/claude-transcript.jsonl "${DIR}/" 2>/dev/null || true
+
+          git add .
+          git -c user.name="github-actions" -c user.email="actions@github.com" \
+            commit -m "Run ${RUN_ID} artifacts" || echo "Nothing to commit"
+          git push origin "${BRANCH}"
+
+          echo "Media pushed to ${BRANCH} branch at ${DIR}/"
+
       - name: Parse trajectory
         if: always()
         run: |
           echo "=== Trajectory Summary ==="
-          echo ""
-
-          # Show each step: tool calls, results, and assistant messages
           cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
             type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
             case "$type" in
               assistant)
-                # Show tool use blocks
                 echo "$line" | jq -r '
                   .message.content[]? |
                   if .type == "tool_use" then
-                    "🔧 TOOL CALL: \(.name)\n   Input: \(.input | tostring | .[0:500])\n"
+                    "TOOL CALL: \(.name)\n   Input: \(.input | tostring | .[0:500])\n"
                   elif .type == "text" then
-                    "💬 ASSISTANT: \(.text | .[0:500])\n"
+                    "ASSISTANT: \(.text | .[0:500])\n"
                   else empty end
                 ' 2>/dev/null
                 ;;
               result)
-                # Show final result
-                echo "$line" | jq -r '
-                  "✅ RESULT: \(.result | .[0:1000])"
-                ' 2>/dev/null
+                echo "$line" | jq -r '"RESULT: \(.result | .[0:1000])"' 2>/dev/null
                 ;;
             esac
           done
-
           echo ""
-          echo "=== Screenshots captured by hooks ==="
-          ls -la /tmp/cua-screenshots/*.png 2>/dev/null || echo "No screenshots found"
-          echo ""
-          echo "=== Screenshot metadata ==="
-          cat /tmp/cua-screenshots/metadata.jsonl 2>/dev/null || echo "No metadata found"
+          echo "Screenshots: $(ls /tmp/cua-screenshots/*.png 2>/dev/null | wc -l | tr -d ' ')"
 
       - name: Upload trajectory artifact
         if: always()
@@ -196,7 +233,7 @@ jobs:
             /tmp/claude-trajectory.jsonl
             /tmp/claude-transcript.jsonl
             /tmp/claude-stderr.txt
-            /tmp/screen-recording.mov
+            /tmp/screen-recording.mp4
             /tmp/cua-screenshots/
 
       - name: Create issue with output
@@ -204,27 +241,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_ID="${{ github.run_id }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${RUN_ID}"
+          RAW="https://raw.githubusercontent.com/${{ github.repository }}/artifacts/runs/${RUN_ID}"
 
-          # Build issue body as a file to avoid escaping issues
+          # Build issue body
           {
             echo "**Triggered by:** ${{ github.actor }}"
             echo "**Prompt:** ${{ inputs.prompt }}"
             echo "**Run:** ${RUN_URL}"
             echo ""
-            echo "## Artifacts"
+            echo "## Screen Recording"
             echo ""
-            echo "Download from [Actions run artifacts](${RUN_URL}#artifacts):"
-            echo "- **claude-trajectory-${{ github.run_id }}** — stream JSONL, Claude Code transcript, screenshots, screen recording (.mov)"
-            echo ""
-
-            # Count screenshots
-            screenshot_count=$(ls /tmp/cua-screenshots/*.png 2>/dev/null | wc -l | tr -d ' ')
-            echo "**Screenshots captured:** ${screenshot_count} (pre/post each tool call via hooks)"
+            echo "https://github.com/${{ github.repository }}/blob/artifacts/runs/${RUN_ID}/recording.mp4?raw=true"
             echo ""
             echo "## Trajectory"
             echo ""
 
+            # Track tool call index for pairing with screenshots
+            step=0
             cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
               type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
               case "$type" in
@@ -237,14 +272,49 @@ jobs:
                       "\(.text)\n"
                     else empty end
                   ' 2>/dev/null
+
+                  # For each tool_use block, embed pre/post screenshots
+                  tool_use_ids=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .id' 2>/dev/null)
+                  for tid in $tool_use_ids; do
+                    tid_short="${tid:0:12}"
+                    pre=$(ls /tmp/cua-screenshots/*_pre_*_${tid_short}.png 2>/dev/null | head -1)
+                    post=$(ls /tmp/cua-screenshots/*_post_*_${tid_short}.png 2>/dev/null | head -1)
+                    if [ -n "$pre" ]; then
+                      fname=$(basename "$pre")
+                      echo "<details><summary>Screenshots (before/after)</summary>"
+                      echo ""
+                      echo "**Before:**"
+                      echo "![pre](${RAW}/screenshots/${fname})"
+                      echo ""
+                    fi
+                    if [ -n "$post" ]; then
+                      fname=$(basename "$post")
+                      echo "**After:**"
+                      echo "![post](${RAW}/screenshots/${fname})"
+                      echo ""
+                      echo "</details>"
+                      echo ""
+                    elif [ -n "$pre" ]; then
+                      echo "</details>"
+                      echo ""
+                    fi
+                  done
                   ;;
                 result)
                   echo "$line" | jq -r '"---\n**Final Result:**\n\(.result | .[0:2000])"' 2>/dev/null
                   ;;
               esac
             done
+
+            echo ""
+            echo "## Raw Data"
+            echo ""
+            echo "- [Claude Code transcript](${RAW}/claude-transcript.jsonl)"
+            echo "- [Stream trajectory](${RAW}/claude-trajectory.jsonl)"
+            echo "- [Screenshot metadata](${RAW}/metadata.jsonl)"
+            echo "- [Download all artifacts](${RUN_URL}#artifacts)"
           } | head -c 60000 > /tmp/issue-body.md
 
           gh issue create \
-            --title "CUA run ${{ github.run_id }}" \
+            --title "CUA run ${RUN_ID}" \
             --body-file /tmp/issue-body.md
