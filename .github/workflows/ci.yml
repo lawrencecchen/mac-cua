@@ -45,8 +45,6 @@ jobs:
 
       - name: Grant TCC permissions (Accessibility + Screen Recording)
         run: |
-          # Get the bundle ID for the runner's terminal process
-          # On GH Actions, the runner agent executes bash directly
           APPS=(
             "/usr/bin/bash"
             "/bin/bash"
@@ -54,27 +52,71 @@ jobs:
             "/usr/sbin/screencapture"
           )
 
+          SERVICES=(
+            "kTCCServiceAccessibility"
+            "kTCCServiceScreenCapture"
+          )
+
+          DATABASES=(
+            "/Library/Application Support/com.apple.TCC/TCC.db"
+            "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+          )
+
+          grant_tcc() {
+            local app="$1"
+            for db in "${DATABASES[@]}"; do
+              for svc in "${SERVICES[@]}"; do
+                if [ "$db" = "/Library/Application Support/com.apple.TCC/TCC.db" ]; then
+                  sudo sqlite3 "$db" \
+                    "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('$svc', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+                else
+                  sqlite3 "$db" \
+                    "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('$svc', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+                fi
+              done
+            done
+          }
+
           for app in "${APPS[@]}"; do
-            if [ -f "$app" ]; then
-              echo "Granting TCC permissions for $app"
-              # Accessibility (kTCCServiceAccessibility)
-              sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-                "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceAccessibility', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
-              # Screen Recording (kTCCServiceScreenCapture)
-              sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-                "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
-            fi
+            [ -f "$app" ] && grant_tcc "$app"
           done
 
-          # Also grant for Node.js
-          NODE_PATH=$(which node)
-          echo "Granting TCC permissions for $NODE_PATH"
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceAccessibility', '$NODE_PATH', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture', '$NODE_PATH', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
+          # Also grant for Node.js and ffmpeg
+          for bin in node ffmpeg; do
+            p=$(which "$bin" 2>/dev/null)
+            [ -n "$p" ] && grant_tcc "$p"
+          done
 
-          echo "TCC permissions granted"
+          echo "TCC permissions granted (system + user databases)"
+
+      - name: Auto-dismiss TCC dialogs
+        run: |
+          # Background AppleScript that clicks "Allow" on any TCC/privacy dialog
+          cat > /tmp/auto-allow.scpt << 'APPLESCRIPT'
+          on run
+            repeat 300 -- run for up to 5 minutes
+              try
+                tell application "System Events"
+                  set allProcs to every process whose visible is true
+                  repeat with proc in allProcs
+                    tell proc
+                      repeat with w in (every window)
+                        set btns to (every button of w whose name is "Allow")
+                        repeat with b in btns
+                          click b
+                        end repeat
+                      end repeat
+                    end tell
+                  end repeat
+                end tell
+              end try
+              delay 1
+            end repeat
+          end run
+          APPLESCRIPT
+          osascript /tmp/auto-allow.scpt &
+          echo $! > /tmp/auto-allow-pid.txt
+          echo "TCC auto-dismiss running (PID: $(cat /tmp/auto-allow-pid.txt))"
 
       - name: Verify display access
         run: |
@@ -134,6 +176,11 @@ jobs:
       - name: Stop screen recording
         if: always()
         run: |
+          # Stop TCC auto-dismiss
+          if [ -f /tmp/auto-allow-pid.txt ]; then
+            kill $(cat /tmp/auto-allow-pid.txt) 2>/dev/null || true
+          fi
+
           if [ -f /tmp/recording-pid.txt ]; then
             pid=$(cat /tmp/recording-pid.txt)
             kill -INT "$pid" 2>/dev/null || true
