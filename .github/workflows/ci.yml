@@ -260,7 +260,7 @@ jobs:
             echo ""
             echo "## Screen Recording"
             echo ""
-            echo "https://github.com/${{ github.repository }}/blob/artifacts/runs/${RUN_ID}/recording.mp4?raw=true"
+            echo '<video src="https://github.com/${{ github.repository }}/blob/artifacts/runs/'"${RUN_ID}"'/recording.mp4?raw=true" controls autoplay muted loop></video>'
             echo ""
             echo "## Trajectory"
             echo ""
@@ -280,29 +280,25 @@ jobs:
                     else empty end
                   ' 2>/dev/null
 
-                  # For each tool_use block, embed pre/post screenshots
+                  # For each tool_use block, embed pre/post screenshots in a table
                   tool_use_ids=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .id' 2>/dev/null)
                   for tid in $tool_use_ids; do
                     tid_short="${tid:0:12}"
                     pre=$(ls /tmp/cua-screenshots/*_pre_*_${tid_short}.png 2>/dev/null | head -1)
                     post=$(ls /tmp/cua-screenshots/*_post_*_${tid_short}.png 2>/dev/null | head -1)
-                    if [ -n "$pre" ]; then
-                      fname=$(basename "$pre")
-                      echo "<details><summary>Screenshots (before/after)</summary>"
+                    if [ -n "$pre" ] || [ -n "$post" ]; then
                       echo ""
-                      echo "**Before:**"
-                      echo "![pre](${RAW}/screenshots/${fname})"
-                      echo ""
-                    fi
-                    if [ -n "$post" ]; then
-                      fname=$(basename "$post")
-                      echo "**After:**"
-                      echo "![post](${RAW}/screenshots/${fname})"
-                      echo ""
-                      echo "</details>"
-                      echo ""
-                    elif [ -n "$pre" ]; then
-                      echo "</details>"
+                      echo "| Before | After |"
+                      echo "|--------|-------|"
+                      pre_cell=""
+                      post_cell=""
+                      if [ -n "$pre" ]; then
+                        pre_cell="![pre](${RAW}/screenshots/$(basename "$pre"))"
+                      fi
+                      if [ -n "$post" ]; then
+                        post_cell="![post](${RAW}/screenshots/$(basename "$post"))"
+                      fi
+                      echo "| ${pre_cell} | ${post_cell} |"
                       echo ""
                     fi
                   done
