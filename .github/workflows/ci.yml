@@ -21,6 +21,15 @@ on:
         required: false
         default: "100"
         type: string
+      model:
+        description: "Claude model to use"
+        required: false
+        default: "claude-opus-4-6"
+        type: choice
+        options:
+          - "claude-opus-4-6"
+          - "claude-sonnet-4-6"
+          - "claude-haiku-4-5-20251001"
   push:
     branches: [main]
   pull_request:
@@ -199,9 +208,10 @@ jobs:
         run: |
           mkdir -p /tmp/cua-screenshots
           claude -p \
+            --model ${{ inputs.model || 'claude-opus-4-6' }} \
             --mcp-config ./mcp.json \
             --allowedTools "mcp__computer-use__computer,Bash,Read,Write,Edit" \
-            --max-turns ${{ inputs.max_turns || '30' }} \
+            --max-turns ${{ inputs.max_turns || '100' }} \
             --output-format stream-json \
             --verbose \
             "${{ inputs.prompt || 'Take a screenshot and describe what you see on the macOS desktop' }}" \
@@ -355,7 +365,12 @@ jobs:
             echo "## Screen Recording"
             echo ""
             if [ -n "$VIDEO_URL" ]; then
-              echo "<video src=\"${VIDEO_URL}\" controls autoplay muted loop></video>"
+              # Use first screenshot as clickable thumbnail linking to video
+              THUMB=$(ls /tmp/cua-screenshots/*_post_*.png 2>/dev/null | head -1)
+              if [ -n "$THUMB" ]; then
+                THUMB_NAME=$(basename "$THUMB")
+                echo "[![Screen Recording](${RAW}/screenshots/${THUMB_NAME})](${VIDEO_URL})"
+              fi
               echo ""
               echo "[Download recording](${VIDEO_URL})"
             else
