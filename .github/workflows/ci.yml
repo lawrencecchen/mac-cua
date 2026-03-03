@@ -16,6 +16,11 @@ on:
         options:
           - "15"
           - "26"
+      max_turns:
+        description: "Max agentic turns for Claude Code"
+        required: false
+        default: "30"
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -65,66 +70,87 @@ jobs:
             "kTCCServiceScreenCapture"
           )
 
-          DATABASES=(
-            "/Library/Application Support/com.apple.TCC/TCC.db"
-            "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-          )
-
           grant_tcc() {
             local app="$1"
-            for db in "${DATABASES[@]}"; do
-              for svc in "${SERVICES[@]}"; do
-                if [ "$db" = "/Library/Application Support/com.apple.TCC/TCC.db" ]; then
-                  sudo sqlite3 "$db" \
-                    "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('$svc', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
-                else
-                  sqlite3 "$db" \
-                    "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('$svc', '$app', 1, 2, 0, 1, 0, 0);" 2>/dev/null || true
-                fi
-              done
-            done
+            local svc="$2"
+            local db="$3"
+            local cmd="INSERT OR REPLACE INTO access VALUES('$svc','$app',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,CAST(strftime('%s','now') AS INTEGER));"
+            if [ "$db" = "/Library/Application Support/com.apple.TCC/TCC.db" ]; then
+              sudo sqlite3 "$db" "$cmd" 2>/dev/null || true
+            else
+              sqlite3 "$db" "$cmd" 2>/dev/null || true
+            fi
           }
 
           for app in "${APPS[@]}"; do
-            if [ -f "$app" ]; then grant_tcc "$app"; fi
+            if [ -f "$app" ]; then
+              echo "Granting TCC for $app"
+              for svc in "${SERVICES[@]}"; do
+                grant_tcc "$app" "$svc" "/Library/Application Support/com.apple.TCC/TCC.db"
+                grant_tcc "$app" "$svc" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+              done
+            fi
           done
 
           # Also grant for Node.js and ffmpeg
           for bin in node ffmpeg; do
             p=$(which "$bin" 2>/dev/null || true)
-            if [ -n "$p" ]; then grant_tcc "$p"; fi
+            if [ -n "$p" ]; then
+              echo "Granting TCC for $p"
+              for svc in "${SERVICES[@]}"; do
+                grant_tcc "$p" "$svc" "/Library/Application Support/com.apple.TCC/TCC.db"
+                grant_tcc "$p" "$svc" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+              done
+            fi
           done
 
+          # Restart tccd to pick up changes
+          sudo killall tccd 2>/dev/null || true
           echo "TCC permissions granted (system + user databases)"
 
-      - name: Auto-dismiss TCC dialogs
+      - name: Suppress screen capture nag dialog
         run: |
-          # Background AppleScript that clicks "Allow" on any TCC/privacy dialog
-          cat > /tmp/auto-allow.scpt << 'APPLESCRIPT'
-          on run
-            repeat 300 -- run for up to 5 minutes
-              try
-                tell application "System Events"
-                  set allProcs to every process whose visible is true
-                  repeat with proc in allProcs
-                    tell proc
-                      repeat with w in (every window)
-                        set btns to (every button of w whose name is "Allow")
-                        repeat with b in btns
-                          click b
-                        end repeat
-                      end repeat
-                    end tell
-                  end repeat
-                end tell
-              end try
-              delay 1
-            end repeat
-          end run
-          APPLESCRIPT
-          osascript /tmp/auto-allow.scpt &
-          echo $! > /tmp/auto-allow-pid.txt
-          echo "TCC auto-dismiss running (PID: $(cat /tmp/auto-allow-pid.txt))"
+          # On macOS 15+, the "bypass window picker" dialog is controlled by replayd
+          # via ScreenCaptureApprovals.plist, separate from TCC.db
+          PLIST="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
+          mkdir -p "$(dirname "$PLIST")"
+          FUTURE="$(date -j -v+100y +'%Y-%m-%d %H:%M:%S +0000')"
+
+          APPS=(
+            "/usr/bin/bash"
+            "/bin/bash"
+            "/usr/bin/osascript"
+            "/usr/sbin/screencapture"
+          )
+
+          for app in "${APPS[@]}"; do
+            if [ -f "$app" ]; then
+              # macOS 15.1+ format with dict keys
+              /usr/bin/defaults write "$PLIST" "$app" -dict \
+                kScreenCaptureApprovalLastAlerted -date "$FUTURE" \
+                kScreenCaptureApprovalLastUsed -date "$FUTURE" 2>/dev/null || \
+              # Fallback: macOS 15.0 format (plain date)
+              /usr/bin/defaults write "$PLIST" "$app" -date "$FUTURE" 2>/dev/null || true
+            fi
+          done
+
+          # Also for Node.js and ffmpeg
+          for bin in node ffmpeg; do
+            p=$(which "$bin" 2>/dev/null || true)
+            if [ -n "$p" ]; then
+              /usr/bin/defaults write "$PLIST" "$p" -dict \
+                kScreenCaptureApprovalLastAlerted -date "$FUTURE" \
+                kScreenCaptureApprovalLastUsed -date "$FUTURE" 2>/dev/null || \
+              /usr/bin/defaults write "$PLIST" "$p" -date "$FUTURE" 2>/dev/null || true
+            fi
+          done
+
+          # Restart replayd and cfprefsd to pick up changes
+          killall -HUP replayd 2>/dev/null || true
+          killall -u "$USER" cfprefsd 2>/dev/null || true
+
+          echo "ScreenCaptureApprovals.plist updated:"
+          /usr/bin/defaults read "$PLIST" 2>/dev/null || echo "(empty)"
 
       - name: Verify display access
         run: |
@@ -175,7 +201,7 @@ jobs:
           claude -p \
             --mcp-config ./mcp.json \
             --allowedTools "mcp__computer-use__computer,Bash,Read,Write,Edit" \
-            --max-turns 10 \
+            --max-turns ${{ inputs.max_turns || '30' }} \
             --output-format stream-json \
             --verbose \
             "${{ inputs.prompt || 'Take a screenshot and describe what you see on the macOS desktop' }}" \
@@ -184,11 +210,6 @@ jobs:
       - name: Stop screen recording
         if: always()
         run: |
-          # Stop TCC auto-dismiss
-          if [ -f /tmp/auto-allow-pid.txt ]; then
-            kill $(cat /tmp/auto-allow-pid.txt) 2>/dev/null || true
-          fi
-
           if [ -f /tmp/recording-pid.txt ]; then
             pid=$(cat /tmp/recording-pid.txt)
             kill -INT "$pid" 2>/dev/null || true
