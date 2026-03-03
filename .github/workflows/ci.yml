@@ -94,6 +94,15 @@ jobs:
           }
           EOF
 
+      - name: Start screen recording
+        run: |
+          # screencapture -v records video, -V sets duration (we'll kill it later)
+          # Use -G to record without showing in dock, -x for no sounds
+          /usr/sbin/screencapture -v -x /tmp/screen-recording.mov &
+          echo $! > /tmp/screencapture-pid.txt
+          echo "Screen recording started (PID: $(cat /tmp/screencapture-pid.txt))"
+          sleep 1
+
       - name: Run Claude Code with computer use
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -102,17 +111,94 @@ jobs:
             --mcp-config ./mcp.json \
             --allowedTools "mcp__computer-use__computer,Bash,Read,Write,Edit" \
             --max-turns 10 \
+            --output-format stream-json \
             --verbose \
             "${{ inputs.prompt || 'Take a screenshot and describe what you see on the macOS desktop' }}" \
-            2>&1 | tee /tmp/claude-output.txt
+            2>/tmp/claude-stderr.txt | tee /tmp/claude-trajectory.jsonl
+
+      - name: Stop screen recording
+        if: always()
+        run: |
+          if [ -f /tmp/screencapture-pid.txt ]; then
+            pid=$(cat /tmp/screencapture-pid.txt)
+            # Send SIGINT to gracefully stop recording (finalizes the .mov file)
+            kill -INT "$pid" 2>/dev/null || true
+            sleep 2
+            echo "Screen recording stopped"
+            ls -la /tmp/screen-recording.mov || echo "No recording file found"
+          fi
+
+      - name: Parse trajectory
+        if: always()
+        run: |
+          echo "=== Trajectory Summary ==="
+          echo ""
+
+          # Show each step: tool calls, results, and assistant messages
+          cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
+            type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+            case "$type" in
+              assistant)
+                # Show tool use blocks
+                echo "$line" | jq -r '
+                  .message.content[]? |
+                  if .type == "tool_use" then
+                    "🔧 TOOL CALL: \(.name)\n   Input: \(.input | tostring | .[0:500])\n"
+                  elif .type == "text" then
+                    "💬 ASSISTANT: \(.text | .[0:500])\n"
+                  else empty end
+                ' 2>/dev/null
+                ;;
+              result)
+                # Show final result
+                echo "$line" | jq -r '
+                  "✅ RESULT: \(.result | .[0:1000])"
+                ' 2>/dev/null
+                ;;
+            esac
+          done
+
+          echo ""
+          echo "=== Full trajectory JSONL available as artifact ==="
+
+      - name: Upload trajectory artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-trajectory-${{ github.run_id }}
+          path: |
+            /tmp/claude-trajectory.jsonl
+            /tmp/claude-stderr.txt
+            /tmp/screen-recording.mov
 
       - name: Create issue with output
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Truncate output to fit in issue body
-          output=$(head -c 60000 /tmp/claude-output.txt)
+          # Build a readable trajectory for the issue
+          trajectory=$(cat /tmp/claude-trajectory.jsonl | while IFS= read -r line; do
+            type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+            case "$type" in
+              assistant)
+                echo "$line" | jq -r '
+                  .message.content[]? |
+                  if .type == "tool_use" then
+                    "**Tool Call:** `\(.name)`\n```json\n\(.input | tojson | .[0:1000])\n```\n"
+                  elif .type == "text" then
+                    "\(.text)\n"
+                  else empty end
+                ' 2>/dev/null
+                ;;
+              result)
+                echo "$line" | jq -r '"---\n**Final Result:**\n\(.result | .[0:2000])"' 2>/dev/null
+                ;;
+            esac
+          done)
+
+          # Truncate to fit GitHub issue body limit
+          trajectory=$(echo "$trajectory" | head -c 60000)
+
           gh issue create \
             --title "CUA run ${{ github.run_id }}" \
             --body "$(cat <<EOF
@@ -120,13 +206,8 @@ jobs:
           **Prompt:** ${{ inputs.prompt }}
           **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-          <details>
-          <summary>Claude Output</summary>
+          ## Trajectory
 
-          \`\`\`
-          $output
-          \`\`\`
-
-          </details>
+          $trajectory
           EOF
           )"
