@@ -19,7 +19,7 @@ on:
       max_turns:
         description: "Max agentic turns for Claude Code"
         required: false
-        default: "30"
+        default: "100"
         type: string
   push:
     branches: [main]
@@ -319,6 +319,24 @@ jobs:
             /tmp/screen-recording.mp4
             /tmp/cua-screenshots/
 
+      - name: Upload video to release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID="${{ github.run_id }}"
+          TAG="run-${RUN_ID}"
+          if [ -f /tmp/screen-recording.mp4 ]; then
+            gh release create "$TAG" /tmp/screen-recording.mp4 \
+              --repo "${{ github.repository }}" \
+              --title "CUA Run ${RUN_ID}" \
+              --notes "Screen recording for run ${RUN_ID}" \
+              --latest=false
+            echo "VIDEO_URL=https://github.com/${{ github.repository }}/releases/download/${TAG}/screen-recording.mp4" >> "$GITHUB_ENV"
+          else
+            echo "VIDEO_URL=" >> "$GITHUB_ENV"
+          fi
+
       - name: Create issue with output
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -336,7 +354,13 @@ jobs:
             echo ""
             echo "## Screen Recording"
             echo ""
-            echo '<video src="https://github.com/${{ github.repository }}/blob/artifacts/runs/'"${RUN_ID}"'/recording.mp4?raw=true" controls autoplay muted loop></video>'
+            if [ -n "$VIDEO_URL" ]; then
+              echo "<video src=\"${VIDEO_URL}\" controls autoplay muted loop></video>"
+              echo ""
+              echo "[Download recording](${VIDEO_URL})"
+            else
+              echo "_No recording available_"
+            fi
             echo ""
             echo "## Trajectory"
             echo ""
