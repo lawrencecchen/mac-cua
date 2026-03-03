@@ -274,13 +274,9 @@ jobs:
           cd /tmp/artifacts-work
           mkdir -p "${DIR}/screenshots"
 
-          # Copy screenshots
+          # Only push screenshots (needed for inline rendering in issue body)
+          # JSON/transcripts/video are in Actions artifacts only
           cp /tmp/cua-screenshots/*.png "${DIR}/screenshots/" 2>/dev/null || true
-          cp /tmp/cua-screenshots/metadata.jsonl "${DIR}/" 2>/dev/null || true
-
-          # Copy transcripts
-          cp /tmp/claude-trajectory.jsonl "${DIR}/" 2>/dev/null || true
-          cp /tmp/claude-transcript.jsonl "${DIR}/" 2>/dev/null || true
 
           git add .
           git -c user.name="github-actions" -c user.email="actions@github.com" \
@@ -415,10 +411,7 @@ jobs:
             echo ""
             echo "## Raw Data"
             echo ""
-            echo "- [Claude Code transcript](${RAW}/claude-transcript.jsonl)"
-            echo "- [Stream trajectory](${RAW}/claude-trajectory.jsonl)"
-            echo "- [Screenshot metadata](${RAW}/metadata.jsonl)"
-            echo "- [Download all artifacts](${RUN_URL}#artifacts)"
+            echo "- [Download all artifacts (transcript, trajectory, screenshots, video)](${RUN_URL}#artifacts)"
           } | head -c 60000 > /tmp/issue-body.md
 
           gh issue create \
